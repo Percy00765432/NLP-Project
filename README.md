@@ -7,7 +7,7 @@
 | :--- | :--- |
 | **Preksha P V** | `1RUA24CSE0331` |
 | **Reshma K P** | `1RUA24CSE0363` |
-| **Rudhayesh** | `1RUA24CSE0379` |
+| **Prathik K B** | `1RUA24CSE0327` |
 | **Rushil Ravi Reddy** | `1RUA24CSE0380` |
 
 **Project Guides:** Prof. Khushboo Pandey & Prof. Priyanka S Shivaramaiah  
