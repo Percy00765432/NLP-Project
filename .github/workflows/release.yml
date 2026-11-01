@@ -1,0 +1,48 @@
+name: Publish Android Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Create GitHub Release with APK
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: "FinNLP Android App ${{ github.ref_name }}"
+          body: |
+            ### 💳 FinNLP Android App Release
+            **Robust NLP Framework for Automated Financial Transaction Extraction and Expense Categorization**
+            School of Computer Science and Engineering, RV University (Team ID: 10)
+
+            #### ✨ Key Features
+            - **100% Native Jetpack Compose (Material 3)** with Dark Mode
+            - **Folded Subword TF-IDF Linear Model (`1.01 MB`)** with sub-millisecond on-device inference (< 0.8 ms)
+            - **Live SMS Auto-Capture** (`BroadcastReceiver`) & **Wi-Fi Banking Push Notifications** (`NotificationListenerService`)
+            - **Auto-hiding permission cards** once granted
+            - **Tap-to-inspect NER Bottom Sheet** with custom VPA / merchant category learning memory
+            - **100% Offline & Privacy-Preserving** (zero network calls, DPDP compliant)
+            - **CSV Export & Monthly Category Budgets**
+
+            #### 📲 Download & Install
+            Download `FinNLP_Android_App.apk` below and install it directly on your Android device!
+          files: |
+            FinNLP_Android_App.apk
+            RVU_FinNLP_Project_Report.docx
+            RVU_FinNLP_Presentation.pptx
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
