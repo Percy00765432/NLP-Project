@@ -1,12 +1,18 @@
 """
-Streamlit Interactive Expense Tracker & Financial NLP Workbench
+Streamlit Interactive Expense Tracker, Financial NLP Workbench & iPhone Shortcuts Webhook Server
 Title: Robust NLP Framework for Automated Financial Transaction Extraction and Expense Categorization
 Team ID: 10 | School of Computer Science and Engineering, RV University
 """
 
 import json
+import socket
+import threading
+import urllib.parse
+from datetime import datetime
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
+
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
@@ -28,6 +34,45 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
+IPHONE_LEDGER_PATH = DATA_DIR / "iphone_synced_ledger.json"
+WEBHOOK_PORT = 8502
+
+
+def get_local_wifi_ip() -> str:
+    """Detects the Mac's active LAN/Wi-Fi IPv4 address so an iPhone on the same network can reach it."""
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+    except Exception:
+        ip = "127.0.0.1"
+    finally:
+        s.close()
+    return ip
+
+
+def load_iphone_ledger() -> List[Dict[str, Any]]:
+    if IPHONE_LEDGER_PATH.exists():
+        try:
+            with open(IPHONE_LEDGER_PATH, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if isinstance(data, list):
+                    return data
+        except Exception:
+            pass
+    return []
+
+
+def append_to_iphone_ledger(entry: Dict[str, Any]) -> None:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    ledger = load_iphone_ledger()
+    if ledger and ledger[0].get("raw_sms") == entry.get("raw_sms"):
+        return
+    ledger.insert(0, entry)
+    with open(IPHONE_LEDGER_PATH, "w", encoding="utf-8") as f:
+        json.dump(ledger, f, indent=2, ensure_ascii=False)
+
+
 # Custom Styling for NER Badges & Cards
 ENTITY_COLORS = {
     "BANK": ("#dbeafe", "#1e40af"),
@@ -44,6 +89,151 @@ ENTITY_COLORS = {
 @st.cache_resource
 def get_pipeline() -> HybridTransactionPipeline:
     return HybridTransactionPipeline(load_transformer=True)
+
+
+@st.cache_resource
+def start_iphone_webhook_server() -> int:
+    """
+    Starts a lightweight background HTTP JSON API server on port 8502 (or next available port)
+    so iPhone Shortcuts can send a POST or GET request directly with `Get Contents of URL`
+    and receive clean JSON (`amount`, `category`, `merchant`, `bank`, etc.) while logging to Mac.
+    """
+    pipeline = get_pipeline()
+
+    class ShortcutWebhookHandler(BaseHTTPRequestHandler):
+        def _send_json(self, status_code: int, payload: Dict[str, Any]):
+            body = json.dumps(payload, indent=2, ensure_ascii=False).encode("utf-8")
+            self.send_response(status_code)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_GET(self):
+            parsed = urllib.parse.urlparse(self.path)
+            qs = urllib.parse.parse_qs(parsed.query)
+            sms_text = qs.get("sms", [""])[0].strip()
+            model_choice = qs.get("model", ["hybrid_ensemble"])[0].strip()
+
+            if parsed.path in ("/api/ledger", "/ledger"):
+                self._send_json(200, {"status": "ok", "count": len(load_iphone_ledger()), "transactions": load_iphone_ledger()})
+                return
+
+            if not sms_text:
+                self._send_json(200, {
+                    "status": "online",
+                    "service": "FinNLP macOS & iPhone Shortcuts Server (Cloudflare Tunnel Ready)",
+                    "usage": "Send GET /ingest?sms=<message> or POST /api/extract with JSON {'sms': '<message>'}",
+                })
+                return
+
+            res = pipeline.process_message(sms_text, preferred_classifier=model_choice)
+            record = {
+                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "source_device": "iPhone Shortcut (GET)",
+                "raw_sms": res["raw_sms"],
+                "amount": res["amount"],
+                "type": res["type"],
+                "category": res["category"],
+                "synopsis_category": res["synopsis_category"],
+                "merchant": res["merchant"],
+                "beneficiary": res["beneficiary"],
+                "bank": res["bank"],
+                "account": res["account"],
+                "date": res["date"],
+                "reference": res["reference"],
+                "vpa": res["vpa"],
+                "language": res["language"],
+                "is_code_mixed": res["is_code_mixed"],
+                "confidence": res["confidence"],
+            }
+            append_to_iphone_ledger(record)
+            self._send_json(200, {"status": "ok", "transaction": record})
+
+        def do_POST(self):
+            content_len = int(self.headers.get("Content-Length", 0))
+            raw_body = self.rfile.read(content_len).decode("utf-8", errors="replace") if content_len > 0 else ""
+            sms_text = ""
+            model_choice = "hybrid_ensemble"
+
+            try:
+                data = json.loads(raw_body)
+                if isinstance(data, dict):
+                    sms_text = str(data.get("sms") or data.get("text") or data.get("message") or "").strip()
+                    model_choice = str(data.get("model", "hybrid_ensemble")).strip()
+            except Exception:
+                qs = urllib.parse.parse_qs(raw_body)
+                if "sms" in qs:
+                    sms_text = qs["sms"][0].strip()
+                else:
+                    sms_text = raw_body.strip()
+
+            if not sms_text:
+                self._send_json(400, {"status": "error", "message": "Missing 'sms' field in request body"})
+                return
+
+            res = pipeline.process_message(sms_text, preferred_classifier=model_choice)
+            record = {
+                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "source_device": "iPhone Shortcut (POST)",
+                "raw_sms": res["raw_sms"],
+                "amount": res["amount"],
+                "type": res["type"],
+                "category": res["category"],
+                "synopsis_category": res["synopsis_category"],
+                "merchant": res["merchant"],
+                "beneficiary": res["beneficiary"],
+                "bank": res["bank"],
+                "account": res["account"],
+                "date": res["date"],
+                "reference": res["reference"],
+                "vpa": res["vpa"],
+                "language": res["language"],
+                "is_code_mixed": res["is_code_mixed"],
+                "confidence": res["confidence"],
+            }
+            append_to_iphone_ledger(record)
+            self._send_json(200, {"status": "ok", "transaction": record})
+
+        def log_message(self, format, *args):
+            pass
+
+    for port_candidate in [WEBHOOK_PORT, 8503, 8504]:
+        try:
+            server = HTTPServer(("0.0.0.0", port_candidate), ShortcutWebhookHandler)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            return port_candidate
+        except OSError:
+            continue
+    return WEBHOOK_PORT
+
+
+@st.cache_resource
+def start_cloudflare_tunnels(api_port: int) -> Dict[str, Optional[str]]:
+    """
+    Automatically opens public HTTPS `*.trycloudflare.com` tunnels for both the iPhone Webhook API
+    and the Streamlit Dashboard so the iPhone works over 5G/LTE/any Wi-Fi anywhere in the world!
+    """
+    urls: Dict[str, Optional[str]] = {"webhook_public": None, "dashboard_public": None}
+    try:
+        from pycloudflared import try_cloudflare
+
+        tunnel_api = try_cloudflare(port=api_port, verbose=False)
+        urls["webhook_public"] = tunnel_api.tunnel.rstrip("/")
+    except Exception:
+        pass
+
+    try:
+        from pycloudflared import try_cloudflare
+
+        tunnel_dash = try_cloudflare(port=8501, verbose=False)
+        urls["dashboard_public"] = tunnel_dash.tunnel.rstrip("/")
+    except Exception:
+        pass
+
+    return urls
 
 
 @st.cache_data
@@ -141,8 +331,45 @@ PRESET_EXAMPLES = {
 
 def main() -> None:
     pipeline = get_pipeline()
+    api_port = start_iphone_webhook_server()
+    cf_urls = start_cloudflare_tunnels(api_port)
+    local_ip = get_local_wifi_ip()
     df_test = load_sample_data()
     eval_report = load_eval_report()
+
+    # Check if an SMS was passed directly via Streamlit URL query parameter (?sms=...)
+    query_params = st.query_params
+    incoming_query_sms = query_params.get("sms", "").strip()
+    if incoming_query_sms:
+        q_res = pipeline.process_message(incoming_query_sms, preferred_classifier="hybrid_ensemble")
+        append_to_iphone_ledger({
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "source_device": "iPhone Shortcut (URL)",
+            "raw_sms": q_res["raw_sms"],
+            "amount": q_res["amount"],
+            "type": q_res["type"],
+            "category": q_res["category"],
+            "synopsis_category": q_res["synopsis_category"],
+            "merchant": q_res["merchant"],
+            "beneficiary": q_res["beneficiary"],
+            "bank": q_res["bank"],
+            "account": q_res["account"],
+            "date": q_res["date"],
+            "reference": q_res["reference"],
+            "vpa": q_res["vpa"],
+            "language": q_res["language"],
+            "is_code_mixed": q_res["is_code_mixed"],
+            "confidence": q_res["confidence"],
+        })
+
+    # Public Cloudflare Tunnel URLs (works from anywhere over 5G/LTE!) vs Local Wi-Fi Fallback
+    public_api_base = cf_urls.get("webhook_public")
+    public_dash_base = cf_urls.get("dashboard_public")
+
+    webhook_post_url = f"{public_api_base}/api/extract" if public_api_base else f"http://{local_ip}:{api_port}/api/extract"
+    webhook_get_url = f"{public_api_base}/ingest?sms=" if public_api_base else f"http://{local_ip}:{api_port}/ingest?sms="
+    dashboard_mobile_url = public_dash_base if public_dash_base else f"http://{local_ip}:8501"
+    local_post_url = f"http://{local_ip}:{api_port}/api/extract"
 
     # Sidebar Header & Project Metadata
     with st.sidebar:
@@ -162,6 +389,19 @@ def main() -> None:
             ],
             format_func=lambda x: x[1],
         )[0]
+
+        st.markdown("---")
+        st.markdown("### ☁️ Public Cloudflare Links")
+        if public_api_base:
+            st.success("🌐 **Cloudflare Tunnel Active!** Works on 5G / LTE / Any Wi-Fi")
+        else:
+            st.info("📶 **Local Wi-Fi Mode Active**")
+        st.markdown("**1. iPhone Shortcuts POST URL:**")
+        st.code(webhook_post_url, language="text")
+        st.markdown("**2. iPhone Quick GET URL:**")
+        st.code(webhook_get_url, language="text")
+        st.markdown("**3. Public Web Dashboard URL:**")
+        st.code(dashboard_mobile_url, language="text")
 
         st.markdown("---")
         st.markdown("### 🎓 RV University — Team 10")
@@ -186,8 +426,30 @@ def main() -> None:
         "and categorize expenses across **English, Hindi, Kannada, Tamil, Telugu, Bengali, and Code-Mixed (Hinglish/Kanglish/Tanglish)** messages."
     )
 
-    tab1, tab2, tab3, tab4 = st.tabs([
+    # Top Quick-Copy Server Banner for iPhone Shortcuts (Cloudflare Tunnel + Local Fallback)
+    banner_title = (
+        "☁️ **Public Cloudflare Tunnel Active (`*.trycloudflare.com`) — Copy Links for iPhone Shortcuts (Works Over 5G / Any Network!)**"
+        if public_api_base
+        else "📲 **Connect iPhone Shortcuts to this macOS Server (Click to Copy Server Links)**"
+    )
+    with st.expander(banner_title, expanded=True):
+        c_link1, c_link2, c_link3 = st.columns(3)
+        with c_link1:
+            st.markdown("**1️⃣ Public HTTPS JSON Webhook (POST)**")
+            st.caption("Copy into iPhone Shortcuts → `Get Contents of URL` (Works on 5G/LTE anywhere, no same-Wi-Fi needed!):")
+            st.code(webhook_post_url, language="text")
+        with c_link2:
+            st.markdown("**2️⃣ Public One-Line Webhook (GET)**")
+            st.caption("Append URL-encoded SMS text directly to this `trycloudflare.com` link:")
+            st.code(webhook_get_url, language="text")
+        with c_link3:
+            st.markdown("**3️⃣ Public Dashboard Link (Anywhere)**")
+            st.caption("Open this full macOS dashboard on your iPhone from any mobile network:")
+            st.code(dashboard_mobile_url, language="text")
+
+    tab1, tab2, tab3, tab4, tab5 = st.tabs([
         "🔍 Live SMS Extractor & Explainable AI",
+        "📱 iPhone Shortcuts Sync & Live Ledger",
         "📊 Personal Expense Tracker & Batch Analyzer",
         "🌐 Multilingual & Code-Mixed Explorer",
         "📈 Model Benchmarks & Evaluation Report",
@@ -203,7 +465,7 @@ def main() -> None:
                 "Choose a sample banking/UPI message (or type your own below):",
                 options=list(PRESET_EXAMPLES.keys()),
             )
-        default_sms = PRESET_EXAMPLES[selected_preset]
+        default_sms = incoming_query_sms if incoming_query_sms else PRESET_EXAMPLES[selected_preset]
 
         sms_input = st.text_area(
             "Input Financial Transaction Message (English / Indic / Code-Mixed):",
@@ -287,9 +549,105 @@ def main() -> None:
                     st.plotly_chart(fig_prob, use_container_width=True)
 
     # =========================================================================
-    # TAB 2: PERSONAL EXPENSE TRACKER & BATCH ANALYZER
+    # TAB 2: IPHONE SHORTCUTS SYNC & LIVE LEDGER
     # =========================================================================
     with tab2:
+        st.markdown("### 📱 iPhone Apple Shortcuts Integration & Live Synced Ledger (`trycloudflare.com`)")
+        if public_api_base:
+            st.success(
+                f"☁️ **Cloudflare Public HTTPS Tunnel Active (`{public_api_base}`)!** Your iPhone does **NOT** need to be on the same Wi-Fi as your Mac—it works over 5G, LTE, or any network."
+            )
+        else:
+            st.info(
+                f"📶 Your Mac is running a live **FinNLP Webhook Server** on `{local_ip}:{api_port}`."
+            )
+
+        col_setup, col_test = st.columns([1.25, 1.0])
+        with col_setup:
+            st.markdown("#### 🔗 Copyable Server Links for iPhone Shortcuts")
+            st.markdown("**Option A — Public HTTPS JSON POST Endpoint (Works Over 5G / Any Network):**")
+            st.code(webhook_post_url, language="text")
+            st.markdown(
+                f"""
+                **How to set up in iPhone Shortcuts (takes 30 seconds):**
+                1. Open the **Shortcuts** app on your iPhone → tap **Automation** → **New Automation** → **Message**.
+                2. Set **Message Contains** to `Rs.` or `INR` or `debited` → choose **Run Immediately**.
+                3. Add action **`Get Contents of URL`**:
+                   - **URL:** `{webhook_post_url}`
+                   - **Method:** `POST`
+                   - **Request Body:** `JSON`
+                   - Add field: Key = `sms`, Text = `Shortcut Input` (the incoming message content).
+                """
+            )
+            st.markdown("**Option B — Local Same-Wi-Fi Fallback Endpoint:**")
+            st.code(local_post_url, language="text")
+
+        with col_test:
+            st.markdown("#### 🧪 Simulate / Test an iPhone Shortcut Push")
+            sim_sms = st.text_area(
+                "Send a test SMS into the live iPhone Ledger:",
+                value="HDFC Bank: Rs.649.00 debited from A/c XX4512 on 01-11-2026 to netflix@axis. UPI Ref: 618293041234",
+                height=85,
+            )
+            col_b1, col_b2 = st.columns(2)
+            with col_b1:
+                if st.button("🚀 Push to Live Ledger", use_container_width=True):
+                    res_sim = pipeline.process_message(sim_sms, preferred_classifier=classifier_choice)
+                    append_to_iphone_ledger({
+                        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        "source_device": "macOS Test / iPhone Sync",
+                        "raw_sms": res_sim["raw_sms"],
+                        "amount": res_sim["amount"],
+                        "type": res_sim["type"],
+                        "category": res_sim["category"],
+                        "synopsis_category": res_sim["synopsis_category"],
+                        "merchant": res_sim["merchant"],
+                        "beneficiary": res_sim["beneficiary"],
+                        "bank": res_sim["bank"],
+                        "account": res_sim["account"],
+                        "date": res_sim["date"],
+                        "reference": res_sim["reference"],
+                        "vpa": res_sim["vpa"],
+                        "language": res_sim["language"],
+                        "is_code_mixed": res_sim["is_code_mixed"],
+                        "confidence": res_sim["confidence"],
+                    })
+                    st.success("Transaction extracted & saved to live ledger!")
+            with col_b2:
+                if st.button("🔄 Refresh Ledger", use_container_width=True):
+                    st.rerun()
+
+            st.markdown("**Terminal `curl` Command (Test Public Cloudflare Tunnel):**")
+            st.code(
+                f'curl -X POST {webhook_post_url} \\\n  -H "Content-Type: application/json" \\\n  -d \'{{"sms": "SBI: Rs.350 debited from A/c XX1234 to uber@axis"}}\'',
+                language="bash",
+            )
+
+        st.markdown("---")
+        st.markdown("#### 📋 Live Transactions Synced from iPhone Shortcuts")
+        iphone_records = load_iphone_ledger()
+        if iphone_records:
+            df_iphone = pd.DataFrame(iphone_records)
+            ic1, ic2, ic3 = st.columns(3)
+            total_ip_spend = df_iphone[df_iphone["type"] == "debit"]["amount"].fillna(0).sum()
+            ic1.metric("Synced Transactions", f"{len(df_iphone)}")
+            ic2.metric("Total Synced Spend (Debits)", f"₹{total_ip_spend:,.2f}")
+            ic3.metric("Latest Sync Timestamp", str(df_iphone.iloc[0].get("timestamp", "Just now")))
+
+            st.dataframe(df_iphone, use_container_width=True, height=280)
+            if st.button("🗑️ Clear Synced iPhone Ledger"):
+                if IPHONE_LEDGER_PATH.exists():
+                    IPHONE_LEDGER_PATH.unlink()
+                st.rerun()
+        else:
+            st.info(
+                "No iPhone transactions synced yet. Copy the webhook URL above into your iPhone **Shortcuts** app or click **🚀 Push to Live Ledger** to test!"
+            )
+
+    # =========================================================================
+    # TAB 3: PERSONAL EXPENSE TRACKER & BATCH ANALYZER
+    # =========================================================================
+    with tab3:
         st.markdown("### 📊 Automated Personal Expense Tracker Dashboard")
         st.markdown(
             "Analyze a batch of bank/UPI SMS messages from the **FinEE test split** or paste/upload your own transaction log to visualize spending."
@@ -302,7 +660,6 @@ def main() -> None:
 
         if not df_test.empty:
             df_batch = df_test.head(sample_count).copy()
-            # Ensure synopsis_category is populated
             df_batch["synopsis_category"] = df_batch["category"].map(
                 lambda c: SYNOPSIS_CATEGORY_MAP.get(str(c), "Shopping")
             )
@@ -375,9 +732,9 @@ def main() -> None:
             )
 
     # =========================================================================
-    # TAB 3: MULTILINGUAL & CODE-MIXED EXPLORER
+    # TAB 4: MULTILINGUAL & CODE-MIXED EXPLORER
     # =========================================================================
-    with tab3:
+    with tab4:
         st.markdown("### 🌐 Multilingual & Code-Mixed Financial Message Support")
         st.markdown(
             "Supports **6 Indian languages (English, Hindi, Kannada, Tamil, Telugu, Bengali)** plus **Romanized Code-Mixed (Hinglish, Kanglish, Tanglish)** banking messages."
@@ -397,37 +754,50 @@ def main() -> None:
                 )
 
     # =========================================================================
-    # TAB 4: MODEL BENCHMARKS & EVALUATION REPORT
+    # TAB 5: MODEL BENCHMARKS & EVALUATION REPORT
     # =========================================================================
-    with tab4:
+    with tab5:
         st.markdown("### 📈 Experimental Evaluation & Model Comparison")
         if eval_report:
-            st.markdown("#### 1. Expense Categorization Model Comparison")
-            models_tbl = pd.DataFrame.from_dict(eval_report["expense_categorization"]["overall_models"], orient="index")
-            models_tbl = models_tbl.reset_index().rename(columns={"index": "Model Architecture"})
-            for col in ["accuracy", "macro_precision", "macro_recall", "macro_f1", "weighted_f1"]:
-                models_tbl[col] = (models_tbl[col] * 100).round(2).astype(str) + "%"
-            st.table(models_tbl)
+            cat_key = "categorization" if "categorization" in eval_report else "expense_categorization"
+            if cat_key in eval_report:
+                st.markdown("#### 1. Expense Categorization Model Comparison")
+                models_tbl = pd.DataFrame.from_dict(eval_report[cat_key]["overall_models"], orient="index")
+                models_tbl = models_tbl.reset_index().rename(columns={"index": "Model Architecture"})
+                for col in ["accuracy", "macro_precision", "macro_recall", "macro_f1", "weighted_f1"]:
+                    if col in models_tbl.columns:
+                        models_tbl[col] = (models_tbl[col] * 100).round(2).astype(str) + "%"
+                st.table(models_tbl)
 
-            st.markdown("#### 2. Financial Entity Extraction (NER + Regex) Performance")
-            ext_tbl = pd.DataFrame.from_dict(eval_report["entity_extraction"], orient="index")
-            ext_tbl = ext_tbl.reset_index().rename(columns={"index": "Entity Field"})
-            for col in ["precision", "recall", "f1_score"]:
-                ext_tbl[col] = (ext_tbl[col] * 100).round(2).astype(str) + "%"
-            st.table(ext_tbl)
+            if "entity_extraction" in eval_report:
+                st.markdown("#### 2. Financial Entity Extraction (NER + Regex) Performance")
+                ext_tbl = pd.DataFrame.from_dict(eval_report["entity_extraction"], orient="index")
+                ext_tbl = ext_tbl.reset_index().rename(columns={"index": "Entity Field"})
+                for col in ["precision", "recall", "f1_score"]:
+                    if col in ext_tbl.columns:
+                        ext_tbl[col] = (ext_tbl[col] * 100).round(2).astype(str) + "%"
+                st.table(ext_tbl)
 
             st.markdown("#### 3. Visual Performance Charts")
             c1, c2 = st.columns(2)
             with c1:
-                if (OUTPUTS_DIR / "model_comparison.png").exists():
-                    st.image(str(OUTPUTS_DIR / "model_comparison.png"), caption="Model Comparison on FinEE Test Set")
-                if (OUTPUTS_DIR / "multilingual_performance.png").exists():
-                    st.image(str(OUTPUTS_DIR / "multilingual_performance.png"), caption="Multilingual & Code-Mixed Accuracy Breakdown")
+                for fname in ["fig_model_comparison.png", "model_comparison.png"]:
+                    if (OUTPUTS_DIR / fname).exists():
+                        st.image(str(OUTPUTS_DIR / fname), caption="Model Comparison on FinEE Test Set")
+                        break
+                for fname in ["fig_multilingual_performance.png", "multilingual_performance.png"]:
+                    if (OUTPUTS_DIR / fname).exists():
+                        st.image(str(OUTPUTS_DIR / fname), caption="Multilingual & Code-Mixed Accuracy Breakdown")
+                        break
             with c2:
-                if (OUTPUTS_DIR / "entity_extraction_f1.png").exists():
-                    st.image(str(OUTPUTS_DIR / "entity_extraction_f1.png"), caption="Entity Extraction Precision, Recall & F1")
-                if (OUTPUTS_DIR / "confusion_matrix.png").exists():
-                    st.image(str(OUTPUTS_DIR / "confusion_matrix.png"), caption="Normalized Category Confusion Matrix")
+                for fname in ["fig_entity_extraction.png", "entity_extraction_f1.png"]:
+                    if (OUTPUTS_DIR / fname).exists():
+                        st.image(str(OUTPUTS_DIR / fname), caption="Entity Extraction Precision, Recall & F1")
+                        break
+                for fname in ["fig_confusion_matrix.png", "confusion_matrix.png"]:
+                    if (OUTPUTS_DIR / fname).exists():
+                        st.image(str(OUTPUTS_DIR / fname), caption="Normalized Category Confusion Matrix")
+                        break
         else:
             st.warning("Run `python train_and_evaluate.py` first to generate evaluation metrics and plots.")
 

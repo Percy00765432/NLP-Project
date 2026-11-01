@@ -43,6 +43,7 @@ import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.app.ActivityCompat
+import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
 import org.json.JSONArray
 import org.json.JSONObject
@@ -69,6 +70,8 @@ class MainActivity : ComponentActivity() {
     private val transactionsState = mutableStateListOf<TransactionRecord>()
     private val budgetsState = mutableStateMapOf<String, Double>()
     private val customVpaRulesState = mutableStateMapOf<String, String>()
+    private var hasNotificationAccessState by mutableStateOf(false)
+    private var hasSmsPermissionState by mutableStateOf(false)
 
     private val incomingReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
@@ -84,6 +87,7 @@ class MainActivity : ComponentActivity() {
         loadCustomVpaRules()
         loadSavedLedger()
         loadSavedBudgets()
+        refreshPermissionStates()
 
         val filter = IntentFilter("com.rvu.finnlp.INCOMING_BANK_MESSAGE")
         ContextCompat.registerReceiver(
@@ -117,6 +121,8 @@ class MainActivity : ComponentActivity() {
                     transactions = transactionsState,
                     budgets = budgetsState,
                     engine = engine,
+                    hasNotificationAccess = hasNotificationAccessState,
+                    hasSmsPermission = hasSmsPermissionState,
                     onAddTransaction = { record -> addRecordIfUnique(applyCustomVpaRule(record)) },
                     onDeleteTransaction = { id ->
                         transactionsState.removeAll { it.id == id }
@@ -146,6 +152,8 @@ class MainActivity : ComponentActivity() {
                                 arrayOf(Manifest.permission.RECEIVE_SMS, Manifest.permission.READ_SMS),
                                 101
                             )
+                        } else {
+                            refreshPermissionStates()
                         }
                     }
                 )
@@ -155,8 +163,27 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
+        refreshPermissionStates()
         rebindAndScanNotifications()
         flushPendingQueue()
+    }
+
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<String>,
+        grantResults: IntArray
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        refreshPermissionStates()
+    }
+
+    private fun refreshPermissionStates() {
+        val enabledPackages = NotificationManagerCompat.getEnabledListenerPackages(this)
+        hasNotificationAccessState = enabledPackages.contains(packageName)
+        hasSmsPermissionState = ContextCompat.checkSelfPermission(
+            this,
+            Manifest.permission.RECEIVE_SMS
+        ) == PackageManager.PERMISSION_GRANTED
     }
 
     private fun rebindAndScanNotifications() {
@@ -386,6 +413,8 @@ fun FinNlpAppScreen(
     transactions: List<TransactionRecord>,
     budgets: Map<String, Double>,
     engine: FinNlpEngine,
+    hasNotificationAccess: Boolean,
+    hasSmsPermission: Boolean,
     onAddTransaction: (TransactionRecord) -> Boolean,
     onDeleteTransaction: (String) -> Unit,
     onUpdateCategory: (TransactionRecord, String) -> Unit,
@@ -476,6 +505,8 @@ fun FinNlpAppScreen(
                 )
                 2 -> SettingsTab(
                     budgets = budgets,
+                    hasNotificationAccess = hasNotificationAccess,
+                    hasSmsPermission = hasSmsPermission,
                     onSaveBudgets = onSaveBudgets,
                     onOpenNotifSettings = onOpenNotifSettings,
                     onRequestSmsPermission = onRequestSmsPermission,
@@ -1165,6 +1196,8 @@ fun EntityTile(label: String, value: String, modifier: Modifier = Modifier) {
 @Composable
 fun SettingsTab(
     budgets: Map<String, Double>,
+    hasNotificationAccess: Boolean,
+    hasSmsPermission: Boolean,
     onSaveBudgets: (Map<String, Double>) -> Unit,
     onOpenNotifSettings: () -> Unit,
     onRequestSmsPermission: () -> Unit,
@@ -1181,53 +1214,57 @@ fun SettingsTab(
         contentPadding = PaddingValues(20.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
-        item {
-            ElevatedCard(
-                shape = RoundedCornerShape(28.dp),
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Column(
-                    modifier = Modifier.padding(20.dp),
-                    verticalArrangement = Arrangement.spacedBy(10.dp)
+        if (!hasNotificationAccess) {
+            item {
+                ElevatedCard(
+                    shape = RoundedCornerShape(28.dp),
+                    modifier = Modifier.fillMaxWidth()
                 ) {
-                    Text("Wi-Fi Notification Auto-Capture", fontWeight = FontWeight.Bold, fontSize = 16.sp)
-                    Text(
-                        "Captures bank & UPI messages from Instagram, WhatsApp, Gmail, Telegram, or Messages over Wi-Fi without needing a SIM card.",
-                        fontSize = 13.sp,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                    Button(
-                        onClick = onOpenNotifSettings,
-                        shape = RoundedCornerShape(50),
-                        modifier = Modifier.fillMaxWidth()
+                    Column(
+                        modifier = Modifier.padding(20.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
                     ) {
-                        Text("Enable Notification Access", fontWeight = FontWeight.Bold)
+                        Text("Wi-Fi Notification Auto-Capture", fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                        Text(
+                            "Captures bank & UPI messages from Instagram, WhatsApp, Gmail, Telegram, or Messages over Wi-Fi without needing a SIM card.",
+                            fontSize = 13.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Button(
+                            onClick = onOpenNotifSettings,
+                            shape = RoundedCornerShape(50),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text("Enable Notification Access", fontWeight = FontWeight.Bold)
+                        }
                     }
                 }
             }
         }
 
-        item {
-            ElevatedCard(
-                shape = RoundedCornerShape(28.dp),
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Column(
-                    modifier = Modifier.padding(20.dp),
-                    verticalArrangement = Arrangement.spacedBy(10.dp)
+        if (!hasSmsPermission) {
+            item {
+                ElevatedCard(
+                    shape = RoundedCornerShape(28.dp),
+                    modifier = Modifier.fillMaxWidth()
                 ) {
-                    Text("Cellular SMS Receiver", fontWeight = FontWeight.Bold, fontSize = 16.sp)
-                    Text(
-                        "Automatically intercepts incoming bank SMS messages when a SIM card is active.",
-                        fontSize = 13.sp,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                    FilledTonalButton(
-                        onClick = onRequestSmsPermission,
-                        shape = RoundedCornerShape(50),
-                        modifier = Modifier.fillMaxWidth()
+                    Column(
+                        modifier = Modifier.padding(20.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
                     ) {
-                        Text("Grant SMS Permission", fontWeight = FontWeight.Bold)
+                        Text("Cellular SMS Receiver", fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                        Text(
+                            "Automatically intercepts incoming bank SMS messages when a SIM card is active.",
+                            fontSize = 13.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        FilledTonalButton(
+                            onClick = onRequestSmsPermission,
+                            shape = RoundedCornerShape(50),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text("Grant SMS Permission", fontWeight = FontWeight.Bold)
+                        }
                     }
                 }
             }
