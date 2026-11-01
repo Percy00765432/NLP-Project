@@ -14,5 +14,14 @@ skills/
 .vscode/
 .idea/
 
-# Large Data & Model Artifacts (optional, keep repo lightweight)
+# Android Gradle Build & Local SDK Config
+android_app/.gradle/
+android_app/build/
+android_app/app/build/
+android_app/local.properties
+android_app/.idea/
+
+# Large Data & Model Artifacts (keep repo under GitHub 100MB file limit)
 *.zip
+models/
+data/

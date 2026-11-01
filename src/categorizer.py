@@ -17,7 +17,6 @@ import pickle
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Tuple
 import numpy as np
-import pandas as pd
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.svm import LinearSVC
 from sklearn.calibration import CalibratedClassifierCV
@@ -220,10 +219,27 @@ class ClassicalMLCategorizer:
 
     @classmethod
     def load(cls, path: Optional[Path] = None) -> "ClassicalMLCategorizer":
+        import sys
+        import types
+
         target = path or (MODELS_DIR / "classical_categorizers.pkl")
         obj = cls()
-        with open(target, "rb") as f:
-            data = pickle.load(f)
+        try:
+            with open(target, "rb") as f:
+                data = pickle.load(f)
+        except OSError:
+            # Fallback on macOS if libomp.dylib is not installed for LightGBM
+            lgb_stub = types.ModuleType("lightgbm")
+            lgb_stub.LGBMClassifier = type("LGBMClassifier", (), {})
+            lgb_stub.Booster = type("Booster", (), {})
+            sys.modules["lightgbm"] = lgb_stub
+            sys.modules["lightgbm.sklearn"] = lgb_stub
+            sys.modules["lightgbm.basic"] = lgb_stub
+            with open(target, "rb") as f:
+                data = pickle.load(f)
+            if "lightgbm" in data.get("models", {}):
+                del data["models"]["lightgbm"]
+
         obj.vectorizer = data["vectorizer"]
         obj.models = data["models"]
         obj.classes_ = data["classes"]
